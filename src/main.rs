@@ -1,12 +1,17 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use std::collections::BTreeMap;
+
+// hide console window on Windows in release
 use eframe::egui::{self};
 use egui_graphs::{to_input_graph, Graph, GraphView, SettingsInteraction};
 use gitlab::{
     api::{groups::GroupBuilder, projects::repository::TreeBuilder, ApiError, Query},
-    GroupId, GroupStatistics, Project, VisibilityLevel,
+    Project,
 };
 use petgraph::{stable_graph::StableGraph, Directed};
-use serde::{Deserialize, Serialize};
+
+mod gitlab_group;
+use gitlab_group::Group;
 
 fn main() -> Result<(), eframe::Error> {
     if std::env::var("RUST_LOG").is_err() {
@@ -29,7 +34,7 @@ struct ConfigAnalyzer {
     group: String,
     password: String,
     gitlab_client: Option<gitlab::Gitlab>,
-    data: Vec<Project>,
+    data: BTreeMap<Box<str>, Project>,
     g: Option<Graph<(), (), Directed>>,
 }
 
@@ -50,35 +55,6 @@ impl ConfigAnalyzer {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Group {
-    /// The ID of the group.
-    pub id: GroupId,
-    /// The name of the group.
-    pub name: String,
-    /// The path to the group.
-    pub path: String,
-    /// The description of the group.
-    pub description: Option<String>,
-    /// Whether the project is public, internal, or private.
-    pub visibility: VisibilityLevel,
-    /// Whether LFS is enabled for the group.
-    pub lfs_enabled: bool,
-    /// The URL to the group avatar.
-    pub avatar_url: Option<String>,
-    /// The URL to the group's profile page.
-    pub web_url: String,
-    /// Whether membership requests are allowed for the group.
-    pub request_access_enabled: bool,
-    pub full_name: String,
-    pub full_path: String,
-    pub parent_id: Option<GroupId>,
-    /// Statistics about the group.
-    pub statistics: Option<GroupStatistics>,
-
-    pub projects: Option<Vec<Project>>, // TODO: create MR for gitlab crate to add this field
-}
-
 impl Default for ConfigAnalyzer {
     fn default() -> Self {
         Self {
@@ -86,7 +62,7 @@ impl Default for ConfigAnalyzer {
             group: "".to_owned(),
             password: std::env::var("GITLAB_TOKEN").unwrap_or_default(),
             gitlab_client: None,
-            data: Vec::new(),
+            data: BTreeMap::new(),
             g: None,
         }
     }
@@ -130,7 +106,11 @@ impl eframe::App for ConfigAnalyzer {
                         match projects_response {
                             Ok(g) => {
                                 log::info!("Group: {:?}", &g);
-                                self.data.extend(g.projects.unwrap().into_iter());
+
+                                self.data
+                                    .extend(g.projects.unwrap().into_iter().map(|project| {
+                                        (project.id.to_string().into_boxed_str(), project)
+                                    }));
                             }
                             Err(e) => {
                                 // ui.label(format!("Error: {}", e));
@@ -146,7 +126,7 @@ impl eframe::App for ConfigAnalyzer {
                                 TreeBuilder::default()
                                     // .path("main.tf")
                                     .ref_("main")
-                                    .project(project.id.value())
+                                    .project(project.0.to_string())
                                     .recursive(true)
                                     .build()
                                     .unwrap()
@@ -159,7 +139,7 @@ impl eframe::App for ConfigAnalyzer {
                                     log::info!(
                                         "Json File: {:?} in project {}",
                                         &tree_object,
-                                        &project.name
+                                        &project.1.name
                                     );
                                 }
                             }
@@ -173,7 +153,7 @@ impl eframe::App for ConfigAnalyzer {
                 for project in &self.data {
                     ui.label(format!(
                         "Project Name: {}, Project ID: {}",
-                        project.name, project.id
+                        project.1.name, project.1.id
                     ));
                 }
             });
