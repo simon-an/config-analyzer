@@ -1,6 +1,5 @@
+use gitlab::{GroupId, GroupStatistics, Project, VisibilityLevel};
 use serde::{Deserialize, Serialize};
-use gitlab::{GroupId, VisibilityLevel, GroupStatistics, Project};
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Group {

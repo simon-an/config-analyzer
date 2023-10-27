@@ -1,18 +1,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::collections::BTreeMap;
 
+use egui_graphs::{Graph, GraphView, SettingsInteraction};
+use petgraph::Directed;
 use serde::{Deserialize, Serialize};
 
 // hide console window on Windows in release
-use eframe::egui::{self, Vec2};
-use egui_graphs::{default_edge_transform, Graph, GraphView, Node, SettingsInteraction};
+use eframe::egui::{self};
 use gitlab::{
     api::{groups::GroupBuilder, projects::repository::TreeBuilder, ApiError, Query},
-    Project,
+    Project, RestError,
 };
-use petgraph::{prelude::*, EdgeType};
+// use egui_graphs::{default_edge_transform, Graph, GraphView, Node, SettingsInteraction, to_graph_custom};
+// use petgraph::{prelude::*, EdgeType};
+
+mod configuration_schema;
+mod gitlab_file;
 mod gitlab_group;
+mod graph;
+use gitlab_file::File;
 use gitlab_group::Group;
+
+use crate::configuration_schema::VariableShareConfig;
 pub const DEFAULT_SPAWN_SIZE: f32 = 250.;
 
 fn main() -> Result<(), eframe::Error> {
@@ -27,21 +36,38 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Config Analyzer",
         options,
-        Box::new(|_cc| Box::<ConfigAnalyzer>::default()),
+        Box::new(|_cc: &eframe::CreationContext<'_>| Box::<ConfigAnalyzer>::default()),
     )
 }
 
 struct ConfigAnalyzer {
     url: String,
-    group: String,
+    groups: Vec<String>,
     password: String,
     gitlab_client: Option<gitlab::Gitlab>,
     data: BTreeMap<Box<str>, Project>,
+    project_configs: BTreeMap<Box<str>, VariableShareConfig>,
+    project_dependencies: Vec<(Box<str>, Box<str>)>,
     graph: Option<Graph<ProjectNode, (), Directed>>,
 }
 
+impl Default for ConfigAnalyzer {
+    fn default() -> Self {
+        Self {
+            url: "".to_owned(),
+            groups: vec!["32365".to_owned(), "32366".to_owned(), "32364".to_owned(), "25429".to_owned()],
+            password: std::env::var("GITLAB_TOKEN").unwrap_or_default(),
+            gitlab_client: None,
+            data: BTreeMap::new(),
+            project_configs: BTreeMap::new(),
+            project_dependencies: Vec::new(),
+            graph: None,
+        }
+    }
+}
+
 #[derive(Clone, Hash, std::fmt::Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct ProjectNode {
+pub struct ProjectNode {
     id: Box<str>,
     name: Box<str>,
     group: Box<str>,
@@ -49,74 +75,9 @@ struct ProjectNode {
 impl From<Project> for ProjectNode {
     fn from(value: Project) -> Self {
         Self {
-            id: value.id.to_string().into_box_str(),
-            name: value.name.into_box_str(),
-            group: value.namespace.name.into_box_str(),
-        }
-    }
-}
-
-impl ConfigAnalyzer {
-    fn generate_graph(&mut self) {
-        // TODO implement dependency graph
-        // let mut g: DiGraphMap<ProjectNode, ()> = GraphMap::new();
-        let mut g: StableGraph<ProjectNode, ()> = StableGraph::new();
-        let mut d: BTreeMap<Box<str>, usize> = BTreeMap::new();
-
-        for project in self.data.iter() {
-            // let node = g.add_node(());
-            // let node = Node::default();
-            // let node = node.with_data(Some(project.1));
-            let index = g.add_node(project.1.clone());
-            d.insert(project.0.clone(), index.index());
-        }
-        // let a = g.add_node(());
-        // let b = g.add_node(());
-        // let c = g.add_node(());
-
-        // g.add_edge(a, b, ());
-        // g.add_edge(b, c, ());
-        // g.add_edge(c, a, ());
-
-        self.graph = Some(to_input_graph(&g));
-        // println!("{:?}", Dot::with_config(&self.graph, &[Config::EdgeNoLabel]));
-        // graph {
-        //     0 [label="\"0\""]
-        //     1 [label="\"0\""]
-        //     2 [label="\"0\""]
-        //     3 [label="\"0\""]
-        //     1 -- 2
-        //     3 -- 4
-        //     2 -- 3
-        // }
-    }
-}
-
-pub fn random_location(size: f32) -> Vec2 {
-    let mut rng = rand::thread_rng();
-    Vec2::new(rng.gen_range(0. ..size), rng.gen_range(0. ..size))
-}
-
-pub fn to_input_graph<N: Clone, E: Clone, Ty: EdgeType>(
-    g: &StableGraph<N, E, Ty>,
-) -> Graph<N, E, Ty> {
-    transform(g, projects_node_transform, default_edge_transform)
-}
-
-pub fn projects_node_transform<N: Clone>(idx: NodeIndex, data: &N) -> Node<N> {
-    let loc = random_location(DEFAULT_SPAWN_SIZE);
-    Node::new(loc, data.clone()).with_label(idx.index().to_string())
-}
-
-impl Default for ConfigAnalyzer {
-    fn default() -> Self {
-        Self {
-            url: "git.eon-cds.de/".to_owned(),
-            group: "23994".to_owned(),
-            password: std::env::var("GITLAB_TOKEN").unwrap_or_default(),
-            gitlab_client: None,
-            data: BTreeMap::new(),
-            graph: None,
+            id: value.id.to_string().into_boxed_str(),
+            name: value.name.into_boxed_str(),
+            group: value.namespace.name.into_boxed_str(),
         }
     }
 }
@@ -124,15 +85,15 @@ impl Default for ConfigAnalyzer {
 impl eframe::App for ConfigAnalyzer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("controls").show(ctx, |ui: &mut egui::Ui| {
-            let url_label = ui.label("Hostname: ");
+            // let url_label = ui.label("Hostname: ");
             ui.vertical(|ui| {
-                ui.heading("Heading 1");
-                ui.text_edit_singleline(&mut self.url)
-                    .labelled_by(url_label.id);
-                ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
+                // ui.heading("Heading 1");
+                // ui.text_edit_singleline(&mut self.url)
+                //     .labelled_by(url_label.id);
+                // ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
 
-                ui.text_edit_singleline(&mut self.group)
-                    .labelled_by("Group".into());
+                // ui.text_edit_singleline(&mut self.group)
+                //     .labelled_by("Group".into());
 
                 // ui.add(egui::Slider::new(&mut self.age, 0..=120).text("age"));
                 if ui.button("Connect to Gitlab").clicked() {
@@ -146,28 +107,30 @@ impl eframe::App for ConfigAnalyzer {
                 ui.label(format!("Current Url {}", self.url));
 
                 if let Some(client) = &self.gitlab_client {
-                    if ui.button("Load Projects in Group").clicked() {
+                    if ui.button("Load Projects in Groups").clicked() {
                         // https://docs.gitlab.com/ee/api/projects.html
-                        let projects_request = GroupBuilder::default()
-                            .group(self.group.clone())
-                            .with_projects(true)
-                            .build()
-                            .unwrap();
-                        let projects_response: Result<Group, ApiError<_>> =
-                            projects_request.query(client);
+                        for group in &self.groups {
+                            let projects_request = GroupBuilder::default()
+                                .group(group.clone())
+                                .with_projects(true)
+                                .build()
+                                .unwrap();
+                            let projects_response: Result<Group, ApiError<_>> =
+                                projects_request.query(client);
 
-                        match projects_response {
-                            Ok(g) => {
-                                log::info!("Group: {:?}", &g);
+                            match projects_response {
+                                Ok(g) => {
+                                    log::debug!("Group: {:?}", &g);
 
-                                self.data
-                                    .extend(g.projects.unwrap().into_iter().map(|project| {
-                                        (project.id.to_string().into_boxed_str(), project)
-                                    }));
-                            }
-                            Err(e) => {
-                                // ui.label(format!("Error: {}", e));
-                                log::error!("Error: {}", e);
+                                    self.data
+                                        .extend(g.projects.unwrap().into_iter().map(|project| {
+                                            (project.id.to_string().into_boxed_str(), project)
+                                        }));
+                                }
+                                Err(e) => {
+                                    // ui.label(format!("Error: {}", e));
+                                    log::error!("Error: {}", e);
+                                }
                             }
                         }
                     }
@@ -186,18 +149,50 @@ impl eframe::App for ConfigAnalyzer {
                                     .query(client)
                                     .ok();
                             if let Some(tos) = tree_object {
+                            //    tos.iter().for_each(|o| {
+                            //         log::info!(
+                            //             "Json File: {:?} in project {}",
+                            //             &o,
+                            //             &project.1.name
+                            //         );
+                            //     });
                                 for tree_object in tos.iter().filter(|o| {
-                                    o.path.starts_with("cli-config-") && o.path.ends_with(".json")
+                                    o.name.starts_with("cli-config-") || o.name.starts_with("redis") && o.name.ends_with(".json") // TODO yaml
                                 }) {
                                     log::info!(
                                         "Json File: {:?} in project {}",
-                                        &tree_object,
+                                        &tree_object.path,
                                         &project.1.name
                                     );
+                                    let file_content: Result<File, ApiError<RestError>> =
+                                        gitlab::api::projects::repository::files::FileBuilder::default()
+                                            .project(project.0.to_string())
+                                            .file_path(tree_object.path.clone())
+                                            .ref_("main")
+                                            .build()
+                                            .unwrap()
+                                            .query(client);
+                                    match file_content {
+                                        Err(error) => {
+                                            log::error!(
+                                                "Failed to load file content for {:?} {}",
+                                                &tree_object,
+                                                error
+                                            );
+                                        }
+                                        Ok(content) => {
+                                            // log::info!("File Content: {}", &content);
+                                            let config: VariableShareConfig =
+                                                serde_json::from_str(&content.get_content()).expect("content of file is not valid json");
+                                            log::debug!("Config: {:?}", &config);
+
+                                            self.project_configs.insert(project.0.clone(), config);
+                                        }
+                                    }
                                 }
                             }
                         }
-
+                        self.update_project_dependencies();
                         self.generate_graph();
                     }
                 }
@@ -216,11 +211,8 @@ impl eframe::App for ConfigAnalyzer {
                 let interaction_settings = &SettingsInteraction::new()
                     .with_dragging_enabled(true)
                     .with_clicking_enabled(true)
-                    .with_folding_enabled(true)
                     .with_selection_enabled(true)
-                    .with_selection_multi_enabled(true)
-                    .with_selection_depth(i32::MAX)
-                    .with_folding_depth(usize::MAX);
+                    .with_selection_multi_enabled(true);
                 ui.add(&mut GraphView::new(&mut graph).with_interactions(interaction_settings));
             }
         });
